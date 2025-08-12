@@ -22,7 +22,6 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
   release:
-    release:
     runs-on: ubuntu-latest
     permissions:
       contents: write
