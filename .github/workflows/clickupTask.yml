@@ -3,13 +3,9 @@ name: Create ClickUp task on PR
 on:
   pull_request:
     branches:
-      - main # altere para a(s) branch(es) desejada(s)
+      - main # ajuste conforme sua branch alvo
     types:
-      - opened
-      - edited
-      - reopened
-      - ready_for_review
-      - review_requested
+      - closed
 
 permissions:
   pull-requests: read
@@ -24,7 +20,7 @@ jobs:
           test -n "${{ secrets.CLICKUP_API_TOKEN }}" || { echo "CLICKUP_API_TOKEN não configurado"; exit 1; }
           test -n "${{ secrets.CLICKUP_FOLDER_ID }}" || { echo "CLICKUP_FOLDER_ID não configurado"; exit 1; }
 
-      - name: Create ClickUp task from PR
+      - name: Create ClickUp task from merged PR
         uses: actions/github-script@v7
         env:
           CLICKUP_API_TOKEN: ${{ secrets.CLICKUP_API_TOKEN }}
@@ -36,18 +32,24 @@ jobs:
             const pr = context.payload.pull_request;
             if (!pr) { core.setFailed('Evento não contém pull_request.'); return; }
 
+            // Verificar se o PR foi mergeado (não apenas fechado)
+            if (!pr.merged) {
+              core.info('PR foi fechado mas não mergeado. Ignorando criação de task.');
+              return;
+            }
+
             const token = process.env.CLICKUP_API_TOKEN;
             const folderId = process.env.CLICKUP_FOLDER_ID;
 
             if (!token) { core.setFailed('CLICKUP_API_TOKEN não configurado.'); return; }
             if (!folderId) { core.setFailed('CLICKUP_FOLDER_ID não configurado.'); return; }
 
-            // 1. Buscar folder para obter a última lista
+            // 1) Buscar folder para obter listas
             const folderUrl = `https://api.clickup.com/api/v2/folder/${encodeURIComponent(folderId)}`;
             const folderRes = await fetch(folderUrl, {
               method: 'GET',
               headers: {
-                'Authorization': token,
+                'Authorization': token, // ClickUp usa token direto, sem "Bearer"
                 'accept': 'application/json'
               }
             });
@@ -61,29 +63,47 @@ jobs:
               return;
             }
 
-            // 2. Extrair ID da última lista
-            const lists = folderData.lists || [];
-            if (lists.length === 0) {
-              core.setFailed('Folder não contém listas disponíveis.');
+            const lists = Array.isArray(folderData.lists) ? folderData.lists : [];
+            if (lists.length === 0) { core.setFailed('Folder não contém listas.'); return; }
+
+            // 2) Selecionar a lista "atual": start_date <= now <= due_date
+            const now = Date.now();
+            const isFiniteMs = v => Number.isFinite(v) && v > 0;
+
+            const candidates = lists
+              .map(l => {
+                const sd = Number(l.start_date);
+                const dd = Number(l.due_date);
+                return { ...l, _sd: sd, _dd: dd };
+              })
+              .filter(l => isFiniteMs(l._sd) && isFiniteMs(l._dd) && l._sd <= now && now <= l._dd);
+
+            // Se houver múltiplas, usa a com maior orderindex
+            let chosen;
+            if (candidates.length > 0) {
+              candidates.sort((a, b) => (b.orderindex || 0) - (a.orderindex || 0));
+              chosen = candidates[0];
+            } else {
+              core.setFailed('Nenhuma lista atual encontrada (now fora do intervalo start_date..due_date).');
               return;
+              // Caso prefira fallback:
+              // const fallbackSorted = [...lists].sort((a,b)=>(b.orderindex||0)-(a.orderindex||0));
+              // chosen = fallbackSorted[0];
+              // core.warning(`Sem lista atual; usando fallback: ${chosen.name} (${chosen.id})`);
             }
 
-            // Ordena por orderindex (maior = mais recente) ou pega a última do array
-            const sortedLists = [...lists].sort((a, b) => (b.orderindex || 0) - (a.orderindex || 0));
-            const lastList = sortedLists[0];
-            const listId = lastList.id;
+            const listId = chosen.id;
+            core.info(`Usando lista atual: ${chosen.name} (ID: ${listId}) [start=${chosen.start_date}, due=${chosen.due_date}]`);
 
-            core.info(`Usando lista: ${lastList.name} (ID: ${listId})`);
-
-            // 3. Preparar dados do PR
-            const title = pr.title || 'Sem título';
+            // 3) Dados do PR
+            const title = `[UI] [TESTES - #${pr.number}] - ${pr.title || 'Sem título'}`;
             const description = pr.body || '';
 
-            // 4. Coletar revisores
+            // 4) Coletar revisores
             const reviewers = new Set((pr.requested_reviewers || []).map(u => u.login));
             if (context.payload.requested_reviewer?.login) reviewers.add(context.payload.requested_reviewer.login);
 
-            // 5. Mapear revisores para IDs do ClickUp
+            // 5) Mapear revisores para IDs do ClickUp
             let userMap = {};
             try { userMap = JSON.parse(process.env.CLICKUP_USER_MAP || '{}'); }
             catch { core.warning('CLICKUP_USER_MAP inválido; usando mapa vazio.'); userMap = {}; }
@@ -97,12 +117,13 @@ jobs:
             const fallback = Number(process.env.CLICKUP_FALLBACK_ASSIGNEE_ID);
             if (mappedAssignees.length === 0 && Number.isFinite(fallback)) mappedAssignees.push(fallback);
 
-            // 6. Criar task na lista obtida
+            // 6) Criar task
             const payload = {
               assignees: mappedAssignees.length ? mappedAssignees : undefined,
               tags: ['testes manuais'],
               name: title,
-              description
+              description,
+               "markdown_content": description
             };
 
             const taskUrl = `https://api.clickup.com/api/v2/list/${encodeURIComponent(listId)}/task`;
