@@ -5,11 +5,7 @@ on:
     branches:
       - main # ajuste conforme sua branch alvo
     types:
-      - opened
-      - edited
-      - reopened
-      - ready_for_review
-      - review_requested
+      - closed
 
 permissions:
   pull-requests: read
@@ -24,7 +20,7 @@ jobs:
           test -n "${{ secrets.CLICKUP_API_TOKEN }}" || { echo "CLICKUP_API_TOKEN não configurado"; exit 1; }
           test -n "${{ secrets.CLICKUP_FOLDER_ID }}" || { echo "CLICKUP_FOLDER_ID não configurado"; exit 1; }
 
-      - name: Create ClickUp task from PR
+      - name: Create ClickUp task from merged PR
         uses: actions/github-script@v7
         env:
           CLICKUP_API_TOKEN: ${{ secrets.CLICKUP_API_TOKEN }}
@@ -35,6 +31,12 @@ jobs:
           script: |
             const pr = context.payload.pull_request;
             if (!pr) { core.setFailed('Evento não contém pull_request.'); return; }
+
+            // Verificar se o PR foi mergeado (não apenas fechado)
+            if (!pr.merged) {
+              core.info('PR foi fechado mas não mergeado. Ignorando criação de task.');
+              return;
+            }
 
             const token = process.env.CLICKUP_API_TOKEN;
             const folderId = process.env.CLICKUP_FOLDER_ID;
@@ -94,7 +96,7 @@ jobs:
             core.info(`Usando lista atual: ${chosen.name} (ID: ${listId}) [start=${chosen.start_date}, due=${chosen.due_date}]`);
 
             // 3) Dados do PR
-            const title = `[TESTES - ${pr.number}] - ${pr.title || 'Sem título'}`;
+            const title = `[UI] [TESTES - #${pr.number}] - ${pr.title || 'Sem título'}`;
             const description = pr.body || '';
 
             // 4) Coletar revisores
