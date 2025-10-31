@@ -122,7 +122,8 @@ jobs:
               assignees: mappedAssignees.length ? mappedAssignees : undefined,
               tags: ['testes manuais'],
               name: title,
-              description
+              description,
+               "markdown_content": description
             };
 
             const taskUrl = `https://api.clickup.com/api/v2/list/${encodeURIComponent(listId)}/task`;
