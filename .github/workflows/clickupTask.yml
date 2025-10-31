@@ -1,0 +1,102 @@
+name: Create ClickUp task on PR
+
+on:
+  pull_request:
+    branches:
+      - main # altere para a(s) branch(es) desejada(s)
+    types:
+      - opened
+      - edited
+      - reopened
+      - ready_for_review
+      - review_requested
+
+jobs:
+  create-clickup-task:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create ClickUp task from PR
+        uses: actions/github-script@v7
+        env:
+          CLICKUP_API_TOKEN: ${{ secrets.CLICKUP_API_TOKEN }}
+          CLICKUP_LIST_ID: ${{ secrets.CLICKUP_LIST_ID }}
+          # JSON no formato: {"githubLogin1": 123456789, "githubLogin2": 987654321}
+          CLICKUP_USER_MAP: ${{ secrets.CLICKUP_USER_MAP }}
+          # Opcional: ID padrão do usuário no ClickUp caso PR não tenha revisor mapeado
+          CLICKUP_FALLBACK_ASSIGNEE_ID: ${{ secrets.CLICKUP_FALLBACK_ASSIGNEE_ID }}
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            if (!pr) {
+              core.setFailed('Evento não contém pull_request.');
+              return;
+            }
+
+            const title = pr.title || 'Sem título';
+            const description = pr.body || '';
+            const listId = process.env.CLICKUP_LIST_ID;
+            const token = process.env.CLICKUP_API_TOKEN;
+
+            if (!listId) core.setFailed('CLICKUP_LIST_ID não configurado.');
+            if (!token) core.setFailed('CLICKUP_API_TOKEN não configurado.');
+            if (core.isFailed) return;
+
+            // Coleta revisores solicitados (requested_reviewers) + revisor do payload se existir
+            const reviewers = new Set(
+              (pr.requested_reviewers || []).map(u => u.login)
+            );
+            if (context.payload.requested_reviewer?.login) {
+              reviewers.add(context.payload.requested_reviewer.login);
+            }
+
+            // Mapeia logins do GitHub para IDs do ClickUp
+            let userMap = {};
+            try {
+              userMap = JSON.parse(process.env.CLICKUP_USER_MAP || '{}');
+            } catch (e) {
+              core.warning('CLICKUP_USER_MAP inválido; usando mapa vazio.');
+              userMap = {};
+            }
+
+            const mappedAssignees = Array.from(reviewers)
+              .map(login => userMap[login])
+              .filter(id => typeof id === 'number' || typeof id === 'string')
+              .map(id => Number(id))
+              .filter(Number.isFinite);
+
+            // Fallback caso não haja revisores mapeados
+            const fallback = Number(process.env.CLICKUP_FALLBACK_ASSIGNEE_ID);
+            if (mappedAssignees.length === 0 && Number.isFinite(fallback)) {
+              mappedAssignees.push(fallback);
+            }
+
+            // Monta payload
+            const payload = {
+              assignees: mappedAssignees.length ? mappedAssignees : undefined,
+              tags: ['testes manuais'],
+              name: title,
+              description: description
+            };
+
+            const url = `https://api.clickup.com/api/v2/list/${encodeURIComponent(listId)}/task`;
+            const res = await fetch(url, {
+              method: 'POST',
+              headers: {
+                'Authorization': token,
+                'accept': 'application/json',
+                'content-type': 'application/json'
+              },
+              body: JSON.stringify(payload)
+            });
+
+            const text = await res.text();
+            let data;
+            try { data = JSON.parse(text); } catch { data = { raw: text }; }
+
+            if (!res.ok) {
+              core.setFailed(`Falha ao criar task no ClickUp: ${res.status} ${res.statusText} - ${text}`);
+              return;
+            }
+
+            core.info(`Task criada no ClickUp. ID: ${data?.id || 'desconhecido'}`);
+            core.setOutput('clickup_task_id', data?.id || '');
